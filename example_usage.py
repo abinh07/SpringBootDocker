@@ -15,8 +15,8 @@ def example_basic_usage():
     """Example of basic usage."""
     print("=== Basic Usage Example ===")
     
-    # Initialize extractor
-    extractor = PDFTableExtractor()
+    # Initialize extractor with multi-page support enabled
+    extractor = PDFTableExtractor(enable_multipage_merge=True)
     
     # Example PDF path (replace with your actual PDF)
     pdf_path = "sample.pdf"
@@ -31,6 +31,22 @@ def example_basic_usage():
     print(f"Extracted {len(extracted_files)} files:")
     for file_path in extracted_files:
         print(f"  - {file_path}")
+
+def example_multipage_disabled():
+    """Example with multi-page merging disabled."""
+    print("\n=== Multi-page Merging Disabled Example ===")
+    
+    # Initialize extractor with multi-page support disabled
+    extractor = PDFTableExtractor(enable_multipage_merge=False)
+    
+    pdf_path = "sample.pdf"
+    if os.path.exists(pdf_path):
+        extracted_files = extractor.extract_tables_from_pdf(pdf_path, "multipage_disabled_output")
+        print(f"Extracted {len(extracted_files)} files (multi-page merging disabled):")
+        for file_path in extracted_files:
+            print(f"  - {file_path}")
+    else:
+        print("PDF file not found for multi-page disabled example")
 
 def example_with_custom_tesseract():
     """Example with custom Tesseract path."""
@@ -144,6 +160,7 @@ def main():
     
     # Run examples
     example_basic_usage()
+    example_multipage_disabled()
     example_with_custom_tesseract()
     example_batch_processing()
     example_data_analysis()
@@ -151,7 +168,8 @@ def main():
     print("\n" + "=" * 40)
     print("Example usage completed!")
     print("\nGenerated files:")
-    print("  - basic_output/: Basic extraction results")
+    print("  - basic_output/: Basic extraction results (with multi-page merging)")
+    print("  - multipage_disabled_output/: Extraction results without multi-page merging")
     print("  - custom_output/: Custom Tesseract extraction results")
     print("  - batch_output/: Batch processing results")
 

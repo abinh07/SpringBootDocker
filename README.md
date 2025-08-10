@@ -6,6 +6,7 @@ A comprehensive Python tool to extract tables from PDF documents, including both
 
 - **Text-based table extraction**: Uses `pdfplumber` to extract tables that are embedded as text in PDFs
 - **Image-based table extraction**: Uses OCR (Tesseract) to extract tables from images within PDFs
+- **Multi-page table support**: Automatically detects and merges tables that span across multiple pages
 - **Multiple output formats**: Exports tables to both CSV and Excel formats
 - **Robust error handling**: Gracefully handles various PDF formats and extraction scenarios
 - **Comprehensive logging**: Detailed logging for debugging and monitoring
@@ -69,6 +70,9 @@ python pdf_table_extractor.py document.pdf --output-dir ./extracted_tables
 # Specify Tesseract path (if not in system PATH)
 python pdf_table_extractor.py document.pdf --tesseract-path /usr/bin/tesseract
 
+# Disable multi-page table merging
+python pdf_table_extractor.py document.pdf --no-multipage-merge
+
 # Enable verbose logging
 python pdf_table_extractor.py document.pdf --verbose
 
@@ -81,6 +85,7 @@ python pdf_table_extractor.py document.pdf --output-dir ./tables --verbose
 - `pdf_path`: Path to the PDF file (required)
 - `--output-dir`: Output directory for extracted tables (default: `output`)
 - `--tesseract-path`: Path to tesseract executable (for OCR)
+- `--no-multipage-merge`: Disable merging of tables spanning multiple pages
 - `--verbose`: Enable verbose logging
 
 ## Output
@@ -101,6 +106,7 @@ The script creates the following files for each extracted table:
 3. Extracts text content from table cells
 4. Converts to pandas DataFrame
 5. Cleans and validates the data
+6. **Multi-page detection**: Automatically detects and merges tables spanning multiple pages
 
 ### Image-based Table Extraction
 
@@ -116,6 +122,18 @@ The script creates the following files for each extracted table:
 - Cleans column names
 - Strips whitespace from cell values
 - Handles missing data appropriately
+
+### Multi-page Table Detection
+
+The extractor automatically detects and merges tables that span across multiple pages by:
+
+- **Header similarity analysis**: Compares table headers across pages to identify related tables
+- **Page continuity check**: Ensures tables are on consecutive pages
+- **Content analysis**: Detects continuation indicators like "continued" or "cont."
+- **Structure validation**: Verifies column structure consistency
+- **Smart merging**: Combines table parts while avoiding duplicate headers
+
+This feature can be disabled using the `--no-multipage-merge` flag if you prefer to extract each page's tables separately.
 
 ## Examples
 

@@ -35,14 +35,17 @@ logger = logging.getLogger(__name__)
 class PDFTableExtractor:
     """Main class for extracting tables from PDF documents."""
     
-    def __init__(self, tesseract_path: Optional[str] = None):
+    def __init__(self, tesseract_path: Optional[str] = None, enable_multipage_merge: bool = True):
         """
         Initialize the PDF Table Extractor.
         
         Args:
             tesseract_path: Path to tesseract executable (for OCR)
+            enable_multipage_merge: Enable merging of tables spanning multiple pages
         """
         self.tesseract_path = tesseract_path
+        self.enable_multipage_merge = enable_multipage_merge
+        
         if tesseract_path:
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
         
@@ -54,6 +57,11 @@ class PDFTableExtractor:
         except Exception as e:
             self.ocr_available = False
             logger.warning(f"Tesseract OCR not available: {e}")
+        
+        if enable_multipage_merge:
+            logger.info("Multi-page table merging is enabled")
+        else:
+            logger.info("Multi-page table merging is disabled")
     
     def extract_tables_from_pdf(self, pdf_path: str, output_dir: str = "output") -> List[str]:
         """
@@ -74,7 +82,10 @@ class PDFTableExtractor:
         
         try:
             # First, try to extract text-based tables
-            text_tables = self._extract_text_tables(pdf_path)
+            if self.enable_multipage_merge:
+                text_tables = self._extract_text_tables_with_multipage_support(pdf_path)
+            else:
+                text_tables = self._extract_text_tables(pdf_path)
             
             # Then, try to extract image-based tables
             image_tables = self._extract_image_tables(pdf_path)
@@ -108,9 +119,58 @@ class PDFTableExtractor:
             logger.error(f"Error extracting tables from {pdf_path}: {e}")
             return []
     
+    def _extract_text_tables_with_multipage_support(self, pdf_path: Path) -> List[pd.DataFrame]:
+        """
+        Extract text-based tables using pdfplumber with multi-page table support.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            
+        Returns:
+            List of extracted DataFrames
+        """
+        all_page_tables = []
+        
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                # First pass: collect all tables from all pages
+                for page_num, page in enumerate(pdf.pages):
+                    logger.info(f"Processing page {page_num + 1} for text tables")
+                    
+                    # Extract tables from the page
+                    page_tables = page.extract_tables()
+                    
+                    for table_num, table in enumerate(page_tables):
+                        if table and len(table) > 1:  # At least header + one row
+                            try:
+                                # Convert to DataFrame
+                                df = pd.DataFrame(table[1:], columns=table[0])
+                                # Clean up the data
+                                df = self._clean_dataframe(df)
+                                if not df.empty:
+                                    all_page_tables.append({
+                                        'page': page_num,
+                                        'table_num': table_num,
+                                        'dataframe': df,
+                                        'header': table[0] if table else []
+                                    })
+                                    logger.info(f"Found text table on page {page_num + 1}, table {table_num + 1}")
+                            except Exception as e:
+                                logger.warning(f"Error processing text table on page {page_num + 1}: {e}")
+                                continue
+                                
+        except Exception as e:
+            logger.error(f"Error extracting text tables: {e}")
+            return []
+        
+        # Second pass: merge multi-page tables
+        merged_tables = self._merge_multipage_tables(all_page_tables)
+        
+        return merged_tables
+    
     def _extract_text_tables(self, pdf_path: Path) -> List[pd.DataFrame]:
         """
-        Extract text-based tables using pdfplumber.
+        Extract text-based tables using pdfplumber (legacy method).
         
         Args:
             pdf_path: Path to the PDF file
@@ -146,6 +206,198 @@ class PDFTableExtractor:
             logger.error(f"Error extracting text tables: {e}")
         
         return tables
+    
+    def _merge_multipage_tables(self, all_page_tables: List[Dict]) -> List[pd.DataFrame]:
+        """
+        Merge tables that span across multiple pages.
+        
+        Args:
+            all_page_tables: List of dictionaries containing table information
+            
+        Returns:
+            List of merged DataFrames
+        """
+        if not all_page_tables:
+            return []
+        
+        # Sort tables by page number and table number
+        all_page_tables.sort(key=lambda x: (x['page'], x['table_num']))
+        
+        merged_tables = []
+        current_table_group = []
+        
+        for i, table_info in enumerate(all_page_tables):
+            current_df = table_info['dataframe']
+            current_header = table_info['header']
+            
+            # Check if this table should be merged with the previous one
+            should_merge = False
+            
+            if current_table_group:
+                # Get the last table in the current group
+                last_table_info = current_table_group[-1]
+                last_df = last_table_info['dataframe']
+                last_header = last_table_info['header']
+                
+                # Check if headers are similar (indicating same table)
+                if self._are_headers_similar(current_header, last_header):
+                    # Check if this table appears to be a continuation
+                    if self._is_table_continuation(last_df, current_df, last_table_info['page'], table_info['page']):
+                        should_merge = True
+                        logger.info(f"Merging table from page {table_info['page'] + 1} with table from page {last_table_info['page'] + 1}")
+            
+            if should_merge:
+                # Add to current group
+                current_table_group.append(table_info)
+            else:
+                # Finalize current group if it exists
+                if current_table_group:
+                    merged_df = self._merge_table_group(current_table_group)
+                    if merged_df is not None and not merged_df.empty:
+                        merged_tables.append(merged_df)
+                        logger.info(f"Merged {len(current_table_group)} table parts into one table with {len(merged_df)} rows")
+                
+                # Start new group
+                current_table_group = [table_info]
+        
+        # Don't forget the last group
+        if current_table_group:
+            merged_df = self._merge_table_group(current_table_group)
+            if merged_df is not None and not merged_df.empty:
+                merged_tables.append(merged_df)
+                logger.info(f"Merged {len(current_table_group)} table parts into one table with {len(merged_df)} rows")
+        
+        return merged_tables
+    
+    def _are_headers_similar(self, header1: List[str], header2: List[str]) -> bool:
+        """
+        Check if two table headers are similar enough to be part of the same table.
+        
+        Args:
+            header1: First header
+            header2: Second header
+            
+        Returns:
+            True if headers are similar
+        """
+        if not header1 or not header2:
+            return False
+        
+        # Clean headers
+        clean_header1 = [str(h).strip().lower() for h in header1 if str(h).strip()]
+        clean_header2 = [str(h).strip().lower() for h in header2 if str(h).strip()]
+        
+        if len(clean_header1) != len(clean_header2):
+            return False
+        
+        # Check if at least 70% of headers match
+        matches = sum(1 for h1, h2 in zip(clean_header1, clean_header2) if h1 == h2)
+        similarity = matches / len(clean_header1) if clean_header1 else 0
+        
+        return similarity >= 0.7
+    
+    def _is_table_continuation(self, last_df: pd.DataFrame, current_df: pd.DataFrame, 
+                              last_page: int, current_page: int) -> bool:
+        """
+        Check if current table is a continuation of the previous table.
+        
+        Args:
+            last_df: Previous table DataFrame
+            current_df: Current table DataFrame
+            last_page: Page number of previous table
+            current_page: Page number of current table
+            
+        Returns:
+            True if tables appear to be continuations
+        """
+        # Check if pages are consecutive
+        if current_page != last_page + 1:
+            return False
+        
+        # Check if column structure is similar
+        if len(last_df.columns) != len(current_df.columns):
+            return False
+        
+        # Check if the last table doesn't end with typical table endings
+        # (like totals, summaries, etc.)
+        last_row = last_df.iloc[-1] if not last_df.empty else None
+        if last_row is not None:
+            last_row_str = ' '.join(str(cell).lower() for cell in last_row if pd.notna(cell))
+            ending_indicators = ['total', 'sum', 'summary', 'end', 'conclusion', 'final']
+            if any(indicator in last_row_str for indicator in ending_indicators):
+                return False
+        
+        # Check if current table doesn't start with typical table headers
+        first_row = current_df.iloc[0] if not current_df.empty else None
+        if first_row is not None:
+            first_row_str = ' '.join(str(cell).lower() for cell in first_row if pd.notna(cell))
+            header_indicators = ['total', 'sum', 'summary', 'continued', 'cont.']
+            if any(indicator in first_row_str for indicator in header_indicators):
+                return True  # This suggests it's a continuation
+        
+        return True
+    
+    def _merge_table_group(self, table_group: List[Dict]) -> pd.DataFrame:
+        """
+        Merge a group of tables into a single DataFrame.
+        
+        Args:
+            table_group: List of table dictionaries to merge
+            
+        Returns:
+            Merged DataFrame
+        """
+        if not table_group:
+            return pd.DataFrame()
+        
+        # Use the header from the first table
+        first_table = table_group[0]
+        merged_data = []
+        
+        for table_info in table_group:
+            df = table_info['dataframe']
+            
+            # Skip header rows for all tables except the first
+            if table_info == first_table:
+                # Include all rows from first table
+                for _, row in df.iterrows():
+                    merged_data.append(row.tolist())
+            else:
+                # Skip potential header row and include data rows
+                for i, (_, row) in enumerate(df.iterrows()):
+                    # Skip first row if it looks like a header
+                    if i == 0 and self._looks_like_header(row, first_table['header']):
+                        continue
+                    merged_data.append(row.tolist())
+        
+        if merged_data:
+            # Create DataFrame with the header from the first table
+            merged_df = pd.DataFrame(merged_data, columns=first_table['header'])
+            return self._clean_dataframe(merged_df)
+        
+        return pd.DataFrame()
+    
+    def _looks_like_header(self, row: pd.Series, original_header: List[str]) -> bool:
+        """
+        Check if a row looks like a header row.
+        
+        Args:
+            row: Row to check
+            original_header: Original header for comparison
+            
+        Returns:
+            True if row looks like a header
+        """
+        row_values = [str(cell).strip().lower() for cell in row if pd.notna(cell)]
+        header_values = [str(cell).strip().lower() for cell in original_header if pd.notna(cell)]
+        
+        # Check if row values are similar to header values
+        if len(row_values) == len(header_values):
+            matches = sum(1 for r, h in zip(row_values, header_values) if r == h)
+            similarity = matches / len(row_values) if row_values else 0
+            return similarity >= 0.6
+        
+        return False
     
     def _extract_image_tables(self, pdf_path: Path) -> List[pd.DataFrame]:
         """
@@ -355,6 +607,7 @@ Examples:
   python pdf_table_extractor.py document.pdf
   python pdf_table_extractor.py document.pdf --output-dir ./tables
   python pdf_table_extractor.py document.pdf --tesseract-path /usr/bin/tesseract
+  python pdf_table_extractor.py document.pdf --no-multipage-merge
         """
     )
     
@@ -375,6 +628,12 @@ Examples:
     )
     
     parser.add_argument(
+        '--no-multipage-merge',
+        action='store_true',
+        help='Disable merging of tables spanning multiple pages'
+    )
+    
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -391,7 +650,11 @@ Examples:
         sys.exit(1)
     
     # Initialize extractor
-    extractor = PDFTableExtractor(tesseract_path=args.tesseract_path)
+    enable_multipage_merge = not args.no_multipage_merge
+    extractor = PDFTableExtractor(
+        tesseract_path=args.tesseract_path,
+        enable_multipage_merge=enable_multipage_merge
+    )
     
     # Extract tables
     logger.info(f"Extracting tables from: {args.pdf_path}")
